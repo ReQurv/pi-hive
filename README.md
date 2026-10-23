@@ -32,11 +32,35 @@ Nessuna dipendenza runtime: `typebox` è dev-only e i due host iniettano già il
 
 ## Uso
 
-1. `/login` → **ReQurv Hive**
-2. incollare la chiave API (`requrv_sk_...`); viene validata subito contro `/models`
-3. `/model` → scegliere `requrv-small-3.8` (o un altro modello testuale pubblicato dal gateway)
+Su **pi** il provider compare in `/login` con due metodi:
 
-La chiave resta in `expires = now + 10 anni` e non viene mai refreshata: è una chiave statica, non un token OAuth.
+| voce | cosa fa |
+| --- | --- |
+| *Sign in with an account* | prompt "Chiave API ReQurv Hive" (testo visibile) |
+| *Sign in with an API key* | prompt "Enter API key" (input mascherato, `type:"secret"`) |
+
+Entrambi validano subito la chiave contro `/models`. Su **omp** esiste solo il primo (`/login` di omp è costruito dai soli provider OAuth).
+
+In alternativa, senza `/login`:
+
+```bash
+export HIVE_API_KEY=requrv_sk_...   # usata da pi (apiKey "$HIVE_API_KEY")
+```
+
+Poi una volta sola:
+
+```
+/model  →  ReQurv Hive → requrv-small-3.8
+```
+
+`pi` non ha un modello predefinito per i provider di terze parti: dopo il login mostra `Logged in to ReQurv Hive, but no default model is configured for provider "requrv-hive"`. È il messaggio generico di pi per ogni provider registrato da un'estensione (`defaultModelPerProvider` è una mappa statica dei soli provider built-in), non un errore del plugin. Scegliendo il modello con `/model` sparisce. Per evitare anche quel primo giro:
+
+```json
+// ~/.pi/agent/settings.json
+{ "defaultModel": "requrv-hive/requrv-small-3.8" }
+```
+
+La credenziale OAuth resta con `expires = now + 10 anni` e non viene mai refreshata: è una chiave statica, non un token.
 
 ## Modelli
 

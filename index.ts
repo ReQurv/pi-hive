@@ -140,6 +140,12 @@ export default function (pi: ExtensionAPI): void {
     name: PROVIDER_NAME,
     baseUrl: BASE_URL,
     api: API,
+    // Solo pi: `apiKey` compone il metodo "Sign in with an API key" (prompt
+    // mascherato `type:"secret"`) e abilita la variabile d'ambiente. Su omp lo
+    // stesso campo verrebbe risolto come chiave letterale "$HIVE_API_KEY"
+    // (`resolveConfigValue` → `$envExact` sul nome, non interpolazione), quindi
+    // va emesso solo dove serve.
+    ...(isOmp ? {} : { apiKey: "$HIVE_API_KEY" }),
     // pi: chiamato allo startup (senza rete) e dalla TUI (con rete); il
     // risultato sostituisce la lista, quindi non restituiamo mai `[]`.
     refreshModels: async (context: unknown): Promise<HiveChatModel[]> => {
