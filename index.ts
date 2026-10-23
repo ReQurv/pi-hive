@@ -8,7 +8,8 @@ const PROVIDER_NAME = "ReQurv Hive";
 // `openai-completions` è il wire che pi/omp parlano con Hive: chat completions,
 // tool call in streaming, `reasoning_effort`. Cambia solo la base URL.
 const API = "openai-completions";
-const BASE_URL = process.env.HIVE_OPENAI_BASE_URL ?? "https://hive.requrv.ai/api/v1";
+const BASE_URL =
+  process.env.HIVE_OPENAI_BASE_URL ?? "https://hive.requrv.ai/api/v1";
 const MODELS_TIMEOUT_MS = 15_000;
 const IMAGE_TIMEOUT_MS = 180_000;
 const DEFAULT_IMAGE_SIZE = "1024x1024";
@@ -18,7 +19,15 @@ const TEN_YEARS_MS = 10 * 365 * 24 * 3600 * 1000;
 // `/models` non dichiara le modalità: solo questo modello è noto multimodale.
 const MULTIMODAL_MODEL_ID = "requrv-small-3.8";
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 
 interface HiveChatModel {
   type: "chat";
@@ -27,7 +36,12 @@ interface HiveChatModel {
   api: string;
   reasoning: boolean;
   input: ("text" | "image")[];
-  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+  };
   contextWindow: number;
   maxTokens: number;
   /** pi: livello utente → valore wire (`null` = non supportato). */
@@ -49,20 +63,24 @@ export function mapHiveModels(payload: unknown): HiveChatModel[] {
 
   const models: HiveChatModel[] = [];
   for (const raw of payload.data) {
-    if (!isRecord(raw) || typeof raw.id !== "string" || raw.id.length === 0) continue;
+    if (!isRecord(raw) || typeof raw.id !== "string" || raw.id.length === 0)
+      continue;
     const id = raw.id;
 
     // `type` assente ma con context window = gateway che omette il tipo: lo
     // trattiamo come modello testuale, come fa la UI del Bridge.
-    const isText = raw.type === "TEXT_GENERATION" || (raw.type === undefined && typeof raw.context_window === "number");
+    const isText =
+      raw.type === "TEXT_GENERATION" ||
+      (raw.type === undefined && typeof raw.context_window === "number");
     // Embedding e image generation non hanno superficie chat.
     if (!isText) continue;
 
     const efforts = Array.isArray(raw.reasoning_efforts)
       ? raw.reasoning_efforts.filter(
-        (effort): effort is string =>
-          typeof effort === "string" && (THINKING_LEVELS as readonly string[]).includes(effort),
-      )
+          (effort): effort is string =>
+            typeof effort === "string" &&
+            (THINKING_LEVELS as readonly string[]).includes(effort),
+        )
       : [];
     const reasoning = efforts.length > 0;
 
@@ -85,7 +103,8 @@ export function mapHiveModels(payload: unknown): HiveChatModel[] {
 
     if (reasoning) {
       const levels: Record<string, string | null> = {};
-      for (const level of THINKING_LEVELS) levels[level] = efforts.includes(level) ? level : null;
+      for (const level of THINKING_LEVELS)
+        levels[level] = efforts.includes(level) ? level : null;
       model.thinkingLevelMap = levels;
       model.thinking = { mode: "effort", efforts };
     }
@@ -96,21 +115,138 @@ export function mapHiveModels(payload: unknown): HiveChatModel[] {
 }
 
 /** Lista live dal gateway; errore leggibile se la chiave o l'endpoint non rispondono. */
-async function fetchHiveModels(key: string, signal?: AbortSignal): Promise<HiveChatModel[]> {
+async function fetchHiveModels(
+  key: string,
+  signal?: AbortSignal,
+): Promise<HiveChatModel[]> {
   const timeout = AbortSignal.timeout(MODELS_TIMEOUT_MS);
   const res = await fetch(`${BASE_URL}/models`, {
     headers: { Authorization: `Bearer ${key}` },
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
-  if (res.status === 401 || res.status === 403) throw new Error("Chiave ReQurv Hive non valida (401/403)");
+  if (res.status === 401 || res.status === 403)
+    throw new Error("Chiave ReQurv Hive non valida (401/403)");
   if (!res.ok) throw new Error(`AI Hive ha risposto con stato ${res.status}`);
   return mapHiveModels(await res.json());
+}
+
+interface DeviceStart {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  intervalSeconds: number;
+  expiresInSeconds: number;
+}
+
+/** Avvia il device flow sul proxy: il browser approva, il CLI riceve la chiave. */
+async function startDeviceLogin(
+  client: "pi" | "omp",
+  signal?: AbortSignal,
+): Promise<DeviceStart> {
+  const timeout = AbortSignal.timeout(MODELS_TIMEOUT_MS);
+  const res = await fetch(`${AUTH_BASE}/device`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client }),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
+  if (!res.ok)
+    throw new Error(`Login ReQurv Hive non disponibile (${res.status})`);
+  const body: unknown = await res.json();
+  if (
+    !isRecord(body) ||
+    typeof body.deviceCode !== "string" ||
+    typeof body.userCode !== "string" ||
+    typeof body.verificationUri !== "string" ||
+    typeof body.intervalSeconds !== "number"
+  ) {
+    throw new Error("Risposta di login ReQurv Hive non valida");
+  }
+  return {
+    deviceCode: body.deviceCode,
+    userCode: body.userCode,
+    verificationUri: body.verificationUri,
+    intervalSeconds: body.intervalSeconds,
+    expiresInSeconds:
+      typeof body.expiresInSeconds === "number" ? body.expiresInSeconds : 600,
+  };
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new Error("Login annullato"));
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const timer = setTimeout(resolve, ms);
+  const onAbort = () => {
+    clearTimeout(timer);
+    reject(new Error("Login annullato"));
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  return promise.finally(() => signal?.removeEventListener("abort", onAbort));
+}
+
+/**
+ * Poll finché l'utente non approva. `deviceCode` viaggia nel body: non deve
+ * mai finire in URL o log. Errori transitori (5xx/429/rete) si ritentano.
+ */
+async function waitForDeviceKey(
+  start: DeviceStart,
+  signal?: AbortSignal,
+  onProgress?: (message: string) => void,
+): Promise<string> {
+  const deadline = Date.now() + start.expiresInSeconds * 1000;
+  const interval = Math.max(1, start.intervalSeconds) * 1000;
+  let failures = 0;
+  onProgress?.("In attesa dell'approvazione nel browser...");
+
+  while (Date.now() < deadline) {
+    await sleep(interval, signal);
+
+    let res: Response;
+    try {
+      res = await fetch(`${AUTH_BASE}/device/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deviceCode: start.deviceCode }),
+        signal,
+      });
+    } catch {
+      if (signal?.aborted) throw new Error("Login annullato");
+      failures += 1;
+      await sleep(Math.min(10_000, interval * 2 ** failures), signal);
+      continue;
+    }
+
+    if (res.status === 202) {
+      failures = 0;
+      continue;
+    }
+
+    const body: unknown = await res.json().catch(() => undefined);
+    if (res.ok && isRecord(body) && typeof body.apiKey === "string") {
+      return body.apiKey;
+    }
+
+    if (res.status >= 500 || res.status === 429) {
+      failures += 1;
+      onProgress?.("Proxy non disponibile, riprovo...");
+      await sleep(Math.min(10_000, interval * 2 ** failures), signal);
+      continue;
+    }
+
+    const code =
+      isRecord(body) && typeof body.error === "string"
+        ? body.error
+        : `stato ${res.status}`;
+    throw new Error(`Login ReQurv Hive fallito (${code})`);
+  }
+  throw new Error("Login ReQurv Hive scaduto: riprova.");
 }
 
 /** Chiave da una credenziale OAuth (`access`) o api-key (`key`). */
 function credentialKey(credential: unknown): string | undefined {
   if (!isRecord(credential)) return undefined;
-  if (credential.type === "api_key") return typeof credential.key === "string" ? credential.key : undefined;
+  if (credential.type === "api_key")
+    return typeof credential.key === "string" ? credential.key : undefined;
   return typeof credential.access === "string" ? credential.access : undefined;
 }
 
@@ -127,14 +263,23 @@ const SEED: HiveChatModel[] = [
     cost: { input: 0.45, output: 2.5, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262_144,
     maxTokens: 32_768,
-    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: null, xhigh: "xhigh", max: null },
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: null,
+      xhigh: "xhigh",
+      max: null,
+    },
     thinking: { mode: "effort", efforts: ["low", "medium", "xhigh"] },
   },
 ];
 
 export default function (pi: ExtensionAPI): void {
   // omp espone `arktype` sull'API, pi no: è l'unico branch di piattaforma.
-  const isOmp = typeof (pi as unknown as { arktype?: unknown }).arktype === "object";
+  const isOmp =
+    typeof (pi as unknown as { arktype?: unknown }).arktype === "object";
 
   const providerConfig = {
     name: PROVIDER_NAME,
@@ -153,37 +298,83 @@ export default function (pi: ExtensionAPI): void {
       const key = credentialKey(context.credential);
       if (!key || context.allowNetwork !== true) return SEED;
       try {
-        return await fetchHiveModels(key, context.signal instanceof AbortSignal ? context.signal : undefined);
+        return await fetchHiveModels(
+          key,
+          context.signal instanceof AbortSignal ? context.signal : undefined,
+        );
       } catch {
         return SEED;
       }
     },
     // omp: discovery con cache SQLite. Il ramo statico lo ignora, per questo
     // `models` non viene registrato su omp.
-    fetchDynamicModels: async (apiKey: string | undefined): Promise<HiveChatModel[]> =>
-      apiKey ? fetchHiveModels(apiKey) : [],
+    fetchDynamicModels: async (
+      apiKey: string | undefined,
+    ): Promise<HiveChatModel[]> => (apiKey ? fetchHiveModels(apiKey) : []),
     // Unico blocco di auth per entrambi: su omp `registerProvider({oauth})`
     // registra anche il provider di /login.
     oauth: {
       name: PROVIDER_NAME,
       async login(callbacks: unknown) {
-        if (!isRecord(callbacks) || typeof callbacks.onPrompt !== "function") {
+        if (!isRecord(callbacks) || typeof callbacks.onAuth !== "function") {
           throw new Error("Login ReQurv Hive non supportato da questo host");
         }
-        const answer: unknown = await (callbacks.onPrompt as (prompt: unknown) => Promise<unknown>)({
-          message: "Chiave API ReQurv Hive",
-          placeholder: "requrv_sk_...",
-        });
-        const key = typeof answer === "string" ? answer.trim() : "";
-        if (!key) throw new Error("Chiave API ReQurv Hive mancante");
-        await fetchHiveModels(key); // valida subito la chiave
-        return { refresh: key, access: key, expires: Date.now() + TEN_YEARS_MS };
+        const signal =
+          callbacks.signal instanceof AbortSignal
+            ? callbacks.signal
+            : undefined;
+        const onAuth = callbacks.onAuth as (info: {
+          url: string;
+          instructions?: string;
+        }) => void;
+        const onDeviceCode =
+          typeof callbacks.onDeviceCode === "function"
+            ? (callbacks.onDeviceCode as (info: {
+                userCode: string;
+                verificationUri: string;
+                intervalSeconds?: number;
+                expiresInSeconds?: number;
+              }) => void)
+            : undefined;
+        const onProgress =
+          typeof callbacks.onProgress === "function"
+            ? (callbacks.onProgress as (message: string) => void)
+            : undefined;
+
+        // Device flow: il browser approva, il terminale riceve la chiave via polling.
+        const start = await startDeviceLogin(isOmp ? "omp" : "pi", signal);
+        if (onDeviceCode) {
+          onDeviceCode({
+            userCode: start.userCode,
+            verificationUri: start.verificationUri,
+            intervalSeconds: start.intervalSeconds,
+            expiresInSeconds: start.expiresInSeconds,
+          });
+        } else {
+          onAuth({
+            url: start.verificationUri,
+            instructions: `Codice ${start.userCode}. Conferma l'accesso nel browser, poi torna qui.`,
+          });
+        }
+
+        const key = await waitForDeviceKey(start, signal, onProgress);
+        // La chiave è già stata creata dal proxy dopo l'approvazione. `/models`
+        // è solo un controllo in più: se il gateway non è raggiungibile il
+        // login deve comunque riuscire.
+        await fetchHiveModels(key).catch(() => undefined);
+        return {
+          refresh: key,
+          access: key,
+          expires: Date.now() + TEN_YEARS_MS,
+        };
       },
       async refreshToken(credentials: unknown) {
         return credentials; // chiave statica: nessun refresh
       },
       getApiKey(credentials: unknown) {
-        return isRecord(credentials) && typeof credentials.access === "string" ? credentials.access : "";
+        return isRecord(credentials) && typeof credentials.access === "string"
+          ? credentials.access
+          : "";
       },
     },
     ...(isOmp ? {} : { models: SEED }),
@@ -196,22 +387,47 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "hive_generate_image",
     label: "ReQurv Hive Image",
-    description: "Genera un'immagine con AI Hive e la salva nella directory di lavoro corrente.",
+    description:
+      "Genera un'immagine con AI Hive e la salva nella directory di lavoro corrente.",
     parameters: Type.Object({
       prompt: Type.String({ description: "Descrizione dell'immagine" }),
-      size: Type.Optional(Type.String({ description: `WIDTHxHEIGHT, default ${DEFAULT_IMAGE_SIZE}` })),
+      size: Type.Optional(
+        Type.String({
+          description: `WIDTHxHEIGHT, default ${DEFAULT_IMAGE_SIZE}`,
+        }),
+      ),
     }),
-    async execute(_toolCallId: string, params: { prompt: string; size?: string }, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
-      const key = isRecord(ctx) && isRecord(ctx.modelRegistry) && typeof ctx.modelRegistry.getApiKeyForProvider === "function"
-        ? await (ctx.modelRegistry.getApiKeyForProvider as (id: string) => Promise<string | undefined>)(PROVIDER_ID)
-        : undefined;
-      if (!key) throw new Error("Nessuna credenziale ReQurv Hive: esegui /login e scegli ReQurv Hive.");
-      const cwd = isRecord(ctx) && typeof ctx.cwd === "string" ? ctx.cwd : process.cwd();
+    async execute(
+      _toolCallId: string,
+      params: { prompt: string; size?: string },
+      signal: AbortSignal | undefined,
+      _onUpdate: unknown,
+      ctx: unknown,
+    ) {
+      const key =
+        isRecord(ctx) &&
+        isRecord(ctx.modelRegistry) &&
+        typeof ctx.modelRegistry.getApiKeyForProvider === "function"
+          ? await (
+              ctx.modelRegistry.getApiKeyForProvider as (
+                id: string,
+              ) => Promise<string | undefined>
+            )(PROVIDER_ID)
+          : undefined;
+      if (!key)
+        throw new Error(
+          "Nessuna credenziale ReQurv Hive: esegui /login e scegli ReQurv Hive.",
+        );
+      const cwd =
+        isRecord(ctx) && typeof ctx.cwd === "string" ? ctx.cwd : process.cwd();
 
       const timeout = AbortSignal.timeout(IMAGE_TIMEOUT_MS);
       const res = await fetch(`${BASE_URL}/images/generations`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           model: IMAGE_MODEL,
           prompt: params.prompt,
@@ -223,15 +439,21 @@ export default function (pi: ExtensionAPI): void {
       if (!res.ok) throw new Error(`AI Hive images: stato ${res.status}`);
 
       const body: unknown = await res.json();
-      const first = isRecord(body) && Array.isArray(body.data) ? body.data[0] : undefined;
-      const b64 = isRecord(first) && typeof first.b64_json === "string" ? first.b64_json : undefined;
+      const first =
+        isRecord(body) && Array.isArray(body.data) ? body.data[0] : undefined;
+      const b64 =
+        isRecord(first) && typeof first.b64_json === "string"
+          ? first.b64_json
+          : undefined;
       if (!b64) throw new Error("Risposta AI Hive senza immagine");
 
       // Il b64 non entra nel contesto (può superare 16 MB): solo il percorso.
       const path = join(cwd, `hive-image-${Date.now()}.png`);
       await writeFile(path, Buffer.from(b64, "base64"));
       return {
-        content: [{ type: "text" as const, text: `Immagine salvata in ${path}` }],
+        content: [
+          { type: "text" as const, text: `Immagine salvata in ${path}` },
+        ],
         details: { path, model: IMAGE_MODEL },
       };
     },

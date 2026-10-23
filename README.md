@@ -32,14 +32,15 @@ Nessuna dipendenza runtime: `typebox` è dev-only e i due host iniettano già il
 
 ## Uso
 
-Su **pi** il provider compare in `/login` con due metodi:
+Login senza digitare chiavi (device flow):
 
-| voce | cosa fa |
-| --- | --- |
-| *Sign in with an account* | prompt "Chiave API ReQurv Hive" (testo visibile) |
-| *Sign in with an API key* | prompt "Enter API key" (input mascherato, `type:"secret"`) |
+1. `/login` → *ReQurv Hive* → il terminale mostra il link `https://hive.requrv.ai/cli?code=XXXX-XXXX` (il codice è solo per il browser: il segreto di polling non lascia mai il CLI);
+2. apri il link, accedi (o usi la sessione Zitadel già attiva) e premi **Autorizza**;
+3. il proxy crea la chiave quando il CLI scambia il `device_code`, la consegna una sola volta e il plugin la valida contro `/models`.
 
-Entrambi validano subito la chiave contro `/models`. Su **omp** esiste solo il primo (`/login` di omp è costruito dai soli provider OAuth).
+Ogni login crea una chiave nuova con nome sequenziale `nomeutente harness N` (es. `cesaretorchia pi 1`, `cesaretorchia pi 2`): non revoca le altre, quindi più macchine possono restare collegate. La chiave è per-utente, nella tua organizzazione, e richiede un piano attivo.
+
+Su **pi** resta anche il metodo manuale *Sign in with an API key* (input mascherato `type:"secret"`). Su **omp** esiste solo il device flow (`/login` di omp è costruito dai soli provider OAuth).
 
 In alternativa, senza `/login`:
 
@@ -92,6 +93,12 @@ export HIVE_OPENAI_BASE_URL=https://hive.requrv.ai/api/v1
 ```
 
 Default: `https://hive.requrv.ai/api/v1`. Deve includere `/api/v1` (il provider aggiunge solo `/chat/completions`, `/models`, `/images/generations`).
+
+Il login usa `${origin}/api/cli`; per un proxy diverso:
+
+```bash
+export HIVE_AUTH_URL=https://hive.example.com/api/cli
+```
 
 ## Verifica
 
