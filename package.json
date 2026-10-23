@@ -1,0 +1,42 @@
+{
+  "name": "@requrv/pi-hive",
+  "version": "0.1.0",
+  "description": "ReQurv Hive provider for pi and omp: /login, dynamic models from /models, image generation.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "omp",
+    "extension",
+    "requrv",
+    "hive",
+    "openai-compatible"
+  ],
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "bun check.ts"
+  },
+  "devDependencies": {
+    "typebox": "^1.3.27"
+  }
+}
