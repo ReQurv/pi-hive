@@ -15,7 +15,6 @@ const IMAGE_TIMEOUT_MS = 180_000;
 const DEFAULT_IMAGE_SIZE = "1024x1024";
 // Id confermato dal gateway (`POST /images/generations`, risposta `data[0].b64_json`).
 const IMAGE_MODEL = "requrv-image";
-const TEN_YEARS_MS = 10 * 365 * 24 * 3600 * 1000;
 // `/models` non dichiara le modalità: solo questo modello è noto multimodale.
 const MULTIMODAL_MODEL_ID = "requrv-small-3.8";
 
@@ -130,118 +129,6 @@ async function fetchHiveModels(
   return mapHiveModels(await res.json());
 }
 
-interface DeviceStart {
-  deviceCode: string;
-  userCode: string;
-  verificationUri: string;
-  intervalSeconds: number;
-  expiresInSeconds: number;
-}
-
-/** Avvia il device flow sul proxy: il browser approva, il CLI riceve la chiave. */
-async function startDeviceLogin(
-  client: "pi" | "omp",
-  signal?: AbortSignal,
-): Promise<DeviceStart> {
-  const timeout = AbortSignal.timeout(MODELS_TIMEOUT_MS);
-  const res = await fetch(`${AUTH_BASE}/device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client }),
-    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-  });
-  if (!res.ok)
-    throw new Error(`Login ReQurv Hive non disponibile (${res.status})`);
-  const body: unknown = await res.json();
-  if (
-    !isRecord(body) ||
-    typeof body.deviceCode !== "string" ||
-    typeof body.userCode !== "string" ||
-    typeof body.verificationUri !== "string" ||
-    typeof body.intervalSeconds !== "number"
-  ) {
-    throw new Error("Risposta di login ReQurv Hive non valida");
-  }
-  return {
-    deviceCode: body.deviceCode,
-    userCode: body.userCode,
-    verificationUri: body.verificationUri,
-    intervalSeconds: body.intervalSeconds,
-    expiresInSeconds:
-      typeof body.expiresInSeconds === "number" ? body.expiresInSeconds : 600,
-  };
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new Error("Login annullato"));
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  const timer = setTimeout(resolve, ms);
-  const onAbort = () => {
-    clearTimeout(timer);
-    reject(new Error("Login annullato"));
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
-  return promise.finally(() => signal?.removeEventListener("abort", onAbort));
-}
-
-/**
- * Poll finché l'utente non approva. `deviceCode` viaggia nel body: non deve
- * mai finire in URL o log. Errori transitori (5xx/429/rete) si ritentano.
- */
-async function waitForDeviceKey(
-  start: DeviceStart,
-  signal?: AbortSignal,
-  onProgress?: (message: string) => void,
-): Promise<string> {
-  const deadline = Date.now() + start.expiresInSeconds * 1000;
-  const interval = Math.max(1, start.intervalSeconds) * 1000;
-  let failures = 0;
-  onProgress?.("In attesa dell'approvazione nel browser...");
-
-  while (Date.now() < deadline) {
-    await sleep(interval, signal);
-
-    let res: Response;
-    try {
-      res = await fetch(`${AUTH_BASE}/device/token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ deviceCode: start.deviceCode }),
-        signal,
-      });
-    } catch {
-      if (signal?.aborted) throw new Error("Login annullato");
-      failures += 1;
-      await sleep(Math.min(10_000, interval * 2 ** failures), signal);
-      continue;
-    }
-
-    if (res.status === 202) {
-      failures = 0;
-      continue;
-    }
-
-    const body: unknown = await res.json().catch(() => undefined);
-    if (res.ok && isRecord(body) && typeof body.apiKey === "string") {
-      return body.apiKey;
-    }
-
-    if (res.status >= 500 || res.status === 429) {
-      failures += 1;
-      onProgress?.("Proxy non disponibile, riprovo...");
-      await sleep(Math.min(10_000, interval * 2 ** failures), signal);
-      continue;
-    }
-
-    const code =
-      isRecord(body) && typeof body.error === "string"
-        ? body.error
-        : `stato ${res.status}`;
-    throw new Error(`Login ReQurv Hive fallito (${code})`);
-  }
-  throw new Error("Login ReQurv Hive scaduto: riprova.");
-}
-
 /** Chiave da una credenziale OAuth (`access`) o api-key (`key`). */
 function credentialKey(credential: unknown): string | undefined {
   if (!isRecord(credential)) return undefined;
@@ -288,9 +175,40 @@ export default function (pi: ExtensionAPI): void {
     // Solo pi: `apiKey` compone il metodo "Sign in with an API key" (prompt
     // mascherato `type:"secret"`) e abilita la variabile d'ambiente. Su omp lo
     // stesso campo verrebbe risolto come chiave letterale "$HIVE_API_KEY"
-    // (`resolveConfigValue` → `$envExact` sul nome, non interpolazione), quindi
-    // va emesso solo dove serve.
+    // (`resolveConfigValue` → `$envExact` sul nome, non interpolazione).
     ...(isOmp ? {} : { apiKey: "$HIVE_API_KEY" }),
+    // Entrambi gli host mostrano i provider OAuth in /login. Questo adapter
+    // aggiunge il prompt manuale su entrambi; pi mantiene anche il metodo API
+    // key nativo sopra. Non avvia device/browser flow.
+    // Le credenziali statiche già salvate restano leggibili via `access`.
+    oauth: {
+      name: `${PROVIDER_NAME} API key`,
+      login: async (callbacks: {
+        onPrompt(prompt: { message: string; placeholder?: string }): Promise<string>;
+        signal?: AbortSignal;
+      }) => {
+        const key = (
+          await callbacks.onPrompt({
+            message: "Inserisci la chiave API ReQurv Hive",
+            placeholder: "requrv_sk_...",
+            // Pi's adapter forwards this field to the prompt and masks it;
+            // omp keeps its existing text-prompt contract.
+            ...(!isOmp ? { type: "secret" as const } : {}),
+          })
+        ).trim();
+        if (!key) throw new Error("La chiave API ReQurv Hive non può essere vuota");
+        // Convalida prima di salvare/sostituire una credenziale.
+        await fetchHiveModels(key, callbacks.signal);
+        return {
+          access: key,
+          refresh: "static-api-key",
+          expires: Date.now() + 10 * 365 * 24 * 60 * 60 * 1000,
+        };
+      },
+      // Le chiavi ReQurv sono statiche; non eseguire refresh remoto.
+      refreshToken: async (credentials: { access: string }) => credentials,
+      getApiKey: (credentials: { access: string }) => credentials.access,
+    },
     // pi: chiamato allo startup (senza rete) e dalla TUI (con rete); il
     // risultato sostituisce la lista, quindi non restituiamo mai `[]`.
     refreshModels: async (context: unknown): Promise<HiveChatModel[]> => {
@@ -311,72 +229,6 @@ export default function (pi: ExtensionAPI): void {
     fetchDynamicModels: async (
       apiKey: string | undefined,
     ): Promise<HiveChatModel[]> => (apiKey ? fetchHiveModels(apiKey) : []),
-    // Unico blocco di auth per entrambi: su omp `registerProvider({oauth})`
-    // registra anche il provider di /login.
-    oauth: {
-      name: PROVIDER_NAME,
-      async login(callbacks: unknown) {
-        if (!isRecord(callbacks) || typeof callbacks.onAuth !== "function") {
-          throw new Error("Login ReQurv Hive non supportato da questo host");
-        }
-        const signal =
-          callbacks.signal instanceof AbortSignal
-            ? callbacks.signal
-            : undefined;
-        const onAuth = callbacks.onAuth as (info: {
-          url: string;
-          instructions?: string;
-        }) => void;
-        const onDeviceCode =
-          typeof callbacks.onDeviceCode === "function"
-            ? (callbacks.onDeviceCode as (info: {
-                userCode: string;
-                verificationUri: string;
-                intervalSeconds?: number;
-                expiresInSeconds?: number;
-              }) => void)
-            : undefined;
-        const onProgress =
-          typeof callbacks.onProgress === "function"
-            ? (callbacks.onProgress as (message: string) => void)
-            : undefined;
-
-        // Device flow: il browser approva, il terminale riceve la chiave via polling.
-        const start = await startDeviceLogin(isOmp ? "omp" : "pi", signal);
-        if (onDeviceCode) {
-          onDeviceCode({
-            userCode: start.userCode,
-            verificationUri: start.verificationUri,
-            intervalSeconds: start.intervalSeconds,
-            expiresInSeconds: start.expiresInSeconds,
-          });
-        } else {
-          onAuth({
-            url: start.verificationUri,
-            instructions: `Codice ${start.userCode}. Conferma l'accesso nel browser, poi torna qui.`,
-          });
-        }
-
-        const key = await waitForDeviceKey(start, signal, onProgress);
-        // La chiave è già stata creata dal proxy dopo l'approvazione. `/models`
-        // è solo un controllo in più: se il gateway non è raggiungibile il
-        // login deve comunque riuscire.
-        await fetchHiveModels(key).catch(() => undefined);
-        return {
-          refresh: key,
-          access: key,
-          expires: Date.now() + TEN_YEARS_MS,
-        };
-      },
-      async refreshToken(credentials: unknown) {
-        return credentials; // chiave statica: nessun refresh
-      },
-      getApiKey(credentials: unknown) {
-        return isRecord(credentials) && typeof credentials.access === "string"
-          ? credentials.access
-          : "";
-      },
-    },
     ...(isOmp ? {} : { models: SEED }),
   };
 
@@ -416,7 +268,7 @@ export default function (pi: ExtensionAPI): void {
           : undefined;
       if (!key)
         throw new Error(
-          "Nessuna credenziale ReQurv Hive: esegui /login e scegli ReQurv Hive.",
+          "Nessuna credenziale ReQurv Hive: esegui /login e inserisci la chiave API.",
         );
       const cwd =
         isRecord(ctx) && typeof ctx.cwd === "string" ? ctx.cwd : process.cwd();

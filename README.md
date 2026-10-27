@@ -1,6 +1,6 @@
 # @requrv/pi-hive
 
-Provider **ReQurv Hive** per [pi](https://github.com/earendil-works/pi) e [omp](https://github.com/oh-my-pi/pi): registra il provider `requrv-hive`, lo rende disponibile in `/login` come "ReQurv Hive", legge i modelli live da `GET https://hive.requrv.ai/api/v1/models` e aggiunge il tool `hive_generate_image`.
+Provider **ReQurv Hive** per [pi](https://github.com/earendil-works/pi) e [omp](https://github.com/oh-my-pi/pi): registra il provider `requrv-hive`, lo rende selezionabile in `/model` (pi) e in `/login` (pi e omp), legge i modelli live da `GET https://hive.requrv.ai/api/v1/models` e aggiunge il tool `hive_generate_image`.
 
 ## Installazione
 
@@ -32,21 +32,21 @@ Nessuna dipendenza runtime: `typebox` è dev-only e i due host iniettano già il
 
 ## Uso
 
-Login senza digitare chiavi (device flow):
+### pi
 
-1. `/login` → *ReQurv Hive* → il terminale mostra il link `https://hive.requrv.ai/cli?code=XXXX-XXXX` (il codice è solo per il browser: il segreto di polling non lascia mai il CLI);
-2. apri il link, accedi (o usi la sessione Zitadel già attiva) e premi **Autorizza**;
-3. il proxy crea la chiave quando il CLI scambia il `device_code`, la consegna una sola volta e il plugin la valida contro `/models`.
-
-Ogni login crea una chiave nuova con nome sequenziale `nomeutente harness N` (es. `cesaretorchia pi 1`, `cesaretorchia pi 2`): non revoca le altre, quindi più macchine possono restare collegate. La chiave è per-utente, nella tua organizzazione, e richiede un piano attivo.
-
-Su **pi** resta anche il metodo manuale *Sign in with an API key* (input mascherato `type:"secret"`). Su **omp** esiste solo il device flow (`/login` di omp è costruito dai soli provider OAuth).
-
-In alternativa, senza `/login`:
+Il provider compare in `/model` e `model list` appena installato (seed statico `requrv-small-3.8`, poi lista live da `/models`). In `/login` Hive compare sia in *Sign in with an account* sia in *Sign in with an API key*; entrambi i metodi chiedono manualmente la chiave, senza aprire un browser o avviare il device flow. Il metodo API key resta mascherato. In alternativa:
 
 ```bash
-export HIVE_API_KEY=requrv_sk_...   # usata da pi (apiKey "$HIVE_API_KEY")
+export HIVE_API_KEY=requrv_sk_...   # oppure inseriscila in "Sign in with an API key"
 ```
+
+Puoi inserire o sostituire la chiave da entrambe le voci. `HIVE_API_KEY` viene inoltre letta da pi.
+
+### omp
+
+Inserisci o sostituisci la chiave con `/login` → *ReQurv Hive API key* e incolla una chiave `requrv_sk_...`. Il plugin la convalida contro `/models` prima di salvarla. La chiave è per-utente, nella tua organizzazione, e richiede un piano attivo. Omp non usa device-code login né apre il browser per questo provider.
+
+Pi offre anche il login API key nativo del provider, che usa `HIVE_API_KEY` quando impostata.
 
 Poi una volta sola:
 
@@ -61,7 +61,7 @@ Poi una volta sola:
 { "defaultModel": "requrv-hive/requrv-small-3.8" }
 ```
 
-La credenziale OAuth resta con `expires = now + 10 anni` e non viene mai refreshata: è una chiave statica, non un token.
+In omp le chiavi statiche inserite tramite `/login` non vengono refreshate. Le credenziali OAuth già salvate da versioni precedenti continuano a essere lette dal campo `access`.
 
 ## Modelli
 
@@ -94,16 +94,10 @@ export HIVE_OPENAI_BASE_URL=https://hive.requrv.ai/api/v1
 
 Default: `https://hive.requrv.ai/api/v1`. Deve includere `/api/v1` (il provider aggiunge solo `/chat/completions`, `/models`, `/images/generations`).
 
-Il login usa `${origin}/api/cli`; per un proxy diverso:
-
-```bash
-export HIVE_AUTH_URL=https://hive.example.com/api/cli
-```
-
 ## Verifica
 
 ```bash
-bun check.ts   # mapping di /models + payload degeneri
+bun check.ts   # mapping /models, registrazione e login manuale/cancel/chiave invalida
 ```
 
 ## Licenza
